@@ -1,6 +1,6 @@
 {
     "name": "@bnk/router",
-    "version": "1.0.6",
+    "version": "1.0.7",
     "type": "module",
     "main": "index.ts",
     "types": "index.ts",
@@ -26,5 +26,9 @@
     "dependencies": {
         "@bnk/cors": "^1.0.1",
         "zod": "^3.23.8"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/brandon-schabel/bnk-router.git"
     }
 }
