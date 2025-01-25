@@ -1,6 +1,5 @@
-import { matchRoute, validateRequest } from './router-utils';
-import { ValidationFailedError } from './router-types';
-import { AuthHandler } from './auth/auth-handler';
+import { matchRoute, validateRequest } from "./router-utils";
+import { ValidationFailedError } from "./router-types";
 import {
   RouteHandler,
   Middleware,
@@ -8,29 +7,27 @@ import {
   RouterOptions,
   Route,
   ValidationSchema,
-  AuthData,
   RequestWithData,
-  AuthConfig,
   RouterPlugin,
-  PluginHookFunction
-} from './router-types';
-import { HttpMethod } from '@bnk/cors';
+  PluginHookFunction,
+} from "./router-types";
+import { HttpMethod } from "@bnk/cors";
 
 export class Router {
   private routes: Route<any>[] = [];
   private globalMws: Middleware<any>[] = [];
   private pathMws: Map<string, Middleware<any>[]> = new Map();
-  private authHandler: AuthHandler | null = null;
-  private onError?: (error: unknown, req: Request) => Response;
+
   private plugins: RouterPlugin[] = [];
+  private onError?: (error: unknown, req: Request) => Response;
 
   constructor(opts?: RouterOptions) {
-    if (opts?.auth) {
-      this.authHandler = new AuthHandler(opts.auth);
+    if (opts?.onError) {
+      this.onError = opts.onError;
     }
-    if (opts?.onError) this.onError = opts.onError;
   }
 
+  /** Plugin registration remains the same. */
   async registerPlugin(plugin: RouterPlugin): Promise<void> {
     this.plugins.push(plugin);
     await plugin.onInit?.(this);
@@ -50,6 +47,7 @@ export class Router {
     return null;
   }
 
+  /** Attach a middleware globally or for a specific path. */
   use(mw: Middleware<any>, path?: string) {
     if (path) {
       const arr = this.pathMws.get(path) || [];
@@ -60,95 +58,109 @@ export class Router {
     }
   }
 
-  configureAuth(cfg: AuthConfig) {
-    if (!this.authHandler) {
-      this.authHandler = new AuthHandler(cfg);
-    } else {
-      this.authHandler.configure(cfg);
-    }
-  }
-
-  async addRoute<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
+  /**
+   * Generic method that registers any route (method + path).
+   * UPDATED: now we explicitly iterate over plugins that implement onBeforeRouteRegister 
+   * and merge in returned opts/handler.
+   */
+  async addRoute<V extends ValidationSchema | undefined, T = unknown>(
     method: HttpMethod,
     path: string,
-    opts: RouteConfig<V, A, T>,
-    handler: RouteHandler<V, A, T>
+    opts: RouteConfig<V, T>,
+    handler: RouteHandler<V, T>
   ): Promise<void> {
-    await this.runPluginHook('onBeforeRouteRegister', this, method, path, opts);
+    // Let plugins modify opts/handler before we register the route.
+    let finalOpts = opts;
+    let finalHandler = handler;
 
-    const wrapped = (req: Request, params: Record<string, string>) =>
-      this.runAuth(req as RequestWithData<T>, params, opts, handler);
-    this.routes.push({ path, method, handler: wrapped, middleware: opts.middleware });
-
-    await this.runPluginHook('onAfterRouteRegister', this, method, path, opts);
-  }
-
-  async get<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
-    path: string,
-    opts: RouteConfig<V, A, T>,
-    handler: RouteHandler<V, A, T>
-  ) {
-    await this.addRoute('GET', path, opts, handler);
-  }
-
-  async post<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
-    path: string,
-    opts: RouteConfig<V, A, T>,
-    handler: RouteHandler<V, A, T>
-  ) {
-    await this.addRoute('POST', path, opts, handler);
-  }
-
-  async put<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
-    path: string,
-    opts: RouteConfig<V, A, T>,
-    handler: RouteHandler<V, A, T>
-  ) {
-    await this.addRoute('PUT', path, opts, handler);
-  }
-
-  async patch<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
-    path: string,
-    opts: RouteConfig<V, A, T>,
-    handler: RouteHandler<V, A, T>
-  ) {
-    await this.addRoute('PATCH', path, opts, handler);
-  }
-
-  async delete<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
-    path: string,
-    opts: RouteConfig<V, A, T>,
-    handler: RouteHandler<V, A, T>
-  ) {
-    await this.addRoute('DELETE', path, opts, handler);
-  }
-
-  private async runPluginResponseHook(req: Request, res: Response): Promise<Response> {
     for (const plugin of this.plugins) {
-      if (plugin.onResponse) {
-        const result = await plugin.onResponse(req, res);
-        if (result instanceof Response) {
-          res = result;
+      if (plugin.onBeforeRouteRegister) {
+        const result = await plugin.onBeforeRouteRegister(this, method, path, finalOpts, finalHandler);
+        if (result) {
+          if (result.opts) {
+            finalOpts = result.opts;
+          }
+          if (result.handler) {
+            finalHandler = result.handler;
+          }
         }
       }
     }
-    return res;
+
+    // We'll wrap the final handler so we can run validation before calling it.
+    const wrapped = (req: Request, params: Record<string, string>) =>
+      this.runValidationAndHandle(req as RequestWithData<T>, params, finalOpts, finalHandler);
+
+    this.routes.push({ path, method, handler: wrapped, middleware: finalOpts.middleware });
+
+    // Allow plugins to do any post-route registration logic
+    await this.runPluginHook("onAfterRouteRegister", this, method, path, finalOpts);
   }
 
+  /**
+   * GET route
+   */
+  async get<V extends ValidationSchema | undefined, T = unknown>(
+    path: string,
+    opts: RouteConfig<V, T>,
+    handler: RouteHandler<V, T>
+  ) {
+    await this.addRoute("GET", path, opts, handler);
+  }
+
+  async post<V extends ValidationSchema | undefined, T = unknown>(
+    path: string,
+    opts: RouteConfig<V, T>,
+    handler: RouteHandler<V, T>
+  ) {
+    await this.addRoute("POST", path, opts, handler);
+  }
+
+  async put<V extends ValidationSchema | undefined, T = unknown>(
+    path: string,
+    opts: RouteConfig<V, T>,
+    handler: RouteHandler<V, T>
+  ) {
+    await this.addRoute("PUT", path, opts, handler);
+  }
+
+  async patch<V extends ValidationSchema | undefined, T = unknown>(
+    path: string,
+    opts: RouteConfig<V, T>,
+    handler: RouteHandler<V, T>
+  ) {
+    await this.addRoute("PATCH", path, opts, handler);
+  }
+
+  async delete<V extends ValidationSchema | undefined, T = unknown>(
+    path: string,
+    opts: RouteConfig<V, T>,
+    handler: RouteHandler<V, T>
+  ) {
+    await this.addRoute("DELETE", path, opts, handler);
+  }
+
+  /**
+   * The main `fetch`-like handler. Takes a Request, returns a Response or null if unmatched.
+   */
   async handle(req: Request): Promise<Response | null> {
     try {
-      const pluginResponse = await this.runPluginHook('onRequest', req);
+      // onRequest plugin hook
+      const pluginResponse = await this.runPluginHook("onRequest", req);
       if (pluginResponse) return await this.runPluginResponseHook(req, pluginResponse);
 
       const { pathname } = new URL(req.url);
       const method = req.method as HttpMethod;
 
+      // Global middlewares
       const globalResp = await this.runMiddlewares(req, this.globalMws);
       if (globalResp) return await this.runPluginResponseHook(req, globalResp);
 
+      // Path-based middlewares
       const pathResp = await this.runPathMiddlewares(req, pathname);
       if (pathResp) return await this.runPluginResponseHook(req, pathResp);
 
+      // Find the matching route
       const matched = this.matchRouteHandler(method, pathname);
       if (!matched) {
         const notFound = this.notFoundRes();
@@ -156,19 +168,25 @@ export class Router {
       }
 
       const { route, params } = matched;
+      // Route-level middleware
       const routeMwResp = await this.runMiddlewares(req, route.middleware ?? []);
       if (routeMwResp) return await this.runPluginResponseHook(req, routeMwResp);
 
-      const res = await route.handler(req, params);
+      // Finally, call the route's handler
+      let res = await route.handler(req, params);
       this.setContentType(res);
-      return await this.runPluginResponseHook(req, res);
+
+      // onResponse plugin hook
+      res = await this.runPluginResponseHook(req, res);
+      return res;
     } catch (err) {
+      // onError plugin hook
       const errorRes = await this.handleError(err, req);
       return await this.runPluginResponseHook(req, errorRes);
     }
   }
 
-  public matchRouteHandler(method: HttpMethod, path: string): { route: Route<any>; params: Record<string, string> } | null {
+  private matchRouteHandler(method: HttpMethod, path: string) {
     for (const r of this.routes) {
       if (r.method !== method) continue;
       const params = matchRoute(path, r.path);
@@ -177,43 +195,21 @@ export class Router {
     return null;
   }
 
-  private async runAuth<V extends ValidationSchema | undefined, A, T>(
+  /**
+   * Runs the validation step, then calls user handler.
+   */
+  private async runValidationAndHandle<
+    V extends ValidationSchema | undefined,
+    T
+  >(
     req: RequestWithData<T>,
     params: Record<string, string>,
-    opts: RouteConfig<V, A, T>,
-    handler: RouteHandler<V, A, T>
+    opts: RouteConfig<V, T>,
+    handler: RouteHandler<V, T>
   ): Promise<Response> {
-    if (!this.authHandler || !opts.auth) {
-      try {
-        const data = await validateRequest(req, params, opts.validation);
-        return handler(req, data);
-      } catch (e) {
-        if (e instanceof ValidationFailedError) {
-          return this.buildValidationErrorRes(e);
-        }
-        throw e;
-      }
-    }
-
-    if (typeof opts.auth === 'object') {
-      try {
-        const authData = await opts.auth.verify(req);
-        (req as any).auth = authData;
-      } catch (err) {
-        if (opts.auth.onError) {
-          return opts.auth.onError(err as Error);
-        }
-        return new Response('Authentication failed', { status: 401 });
-      }
-    } else {
-      const { response: authRes, authData } = await this.authHandler.handleAuth(req, opts.auth);
-      if (authRes) return authRes;
-      (req as any).auth = authData;
-    }
-
     try {
       const data = await validateRequest(req, params, opts.validation);
-      return handler(req, { ...data, auth: (req as any).auth });
+      return handler(req, data);
     } catch (e) {
       if (e instanceof ValidationFailedError) {
         return this.buildValidationErrorRes(e);
@@ -224,7 +220,7 @@ export class Router {
 
   private async runMiddlewares(req: Request, mws: Middleware<any>[]): Promise<Response | null> {
     for (const mw of mws) {
-      const res = await mw(req);
+      const res = await mw(req as any);
       if (res) return res;
     }
     return null;
@@ -246,42 +242,54 @@ export class Router {
       messages: e.messages
     }));
     return new Response(
-      JSON.stringify({ error: 'Validation failed', details }),
+      JSON.stringify({ error: "Validation failed", details }),
       {
         status: 400,
-        headers: { 'Content-Type': 'application/json' }
+        headers: { "Content-Type": "application/json" }
       }
     );
   }
 
   private notFoundRes(): Response {
-    return new Response(JSON.stringify({ error: 'Not Found' }), {
+    return new Response(JSON.stringify({ error: "Not Found" }), {
       status: 404,
-      headers: { 'Content-Type': 'application/json' }
+      headers: { "Content-Type": "application/json" }
     });
   }
 
   private async handleError(error: unknown, req: Request): Promise<Response> {
-    const pluginResponse = await this.runPluginHook('onError', error, req);
+    const pluginResponse = await this.runPluginHook("onError", error, req);
     if (pluginResponse) return pluginResponse;
 
     if (this.onError) {
       return this.onError(error, req);
     }
 
+    // Fix #3: Use "An unexpected error occurred." for non-Error throws.
     return new Response(
       JSON.stringify({
-        error: 'Internal Server Error',
-        message: error instanceof Error ? error.message : 'An unexpected error occurred.'
+        error: "Internal Server Error",
+        message: error instanceof Error ? error.message : "An unexpected error occurred."
       }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
+      { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
 
+  private async runPluginResponseHook(req: Request, res: Response): Promise<Response> {
+    for (const plugin of this.plugins) {
+      if (plugin.onResponse) {
+        const result = await plugin.onResponse(req, res);
+        if (result instanceof Response) {
+          res = result;
+        }
+      }
+    }
+    return res;
+  }
+
   private setContentType(res: Response) {
-    if (!res.headers.get('content-type')) {
-      res.headers.set('content-type', 'application/json');
+    if (!res.headers.get("content-type")) {
+      res.headers.set("content-type", "application/json");
     }
   }
 }
-
