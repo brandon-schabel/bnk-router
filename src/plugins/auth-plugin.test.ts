@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { Router } from "../router";
-import { AuthPlugin } from "./auth-plugin";
+import { AuthPlugin, RouteConfigWithAuth } from "./auth-plugin";
 
 describe("Router with Authentication Plugin", () => {
     test("handles successful authentication", async () => {
@@ -25,9 +25,12 @@ describe("Router with Authentication Plugin", () => {
         await router.registerPlugin(authPlugin);
 
         // 4. Add a protected route: { auth: true }
-        await router.get("/secure", {}, async (req, data) => {
+        await router.get("/secure", { auth: true } satisfies RouteConfigWithAuth<undefined, unknown>, async (req, data) => {
             // If authentication succeeded, req.auth will have our mockUser
-            return new Response(JSON.stringify({ success: true }), {
+            return new Response(JSON.stringify({ 
+                success: true, 
+                user: (req as any).auth 
+            }), {
                 status: 200,
                 headers: { "Content-Type": "application/json" },
             });
@@ -68,7 +71,7 @@ describe("Router with Authentication Plugin", () => {
 
         await router.registerPlugin(authPlugin);
 
-        await router.get("/secure", {}, async () => {
+        await router.get("/secure", { auth: true } satisfies RouteConfigWithAuth<undefined, unknown>, async () => {
             return new Response("Should not reach here");
         });
 

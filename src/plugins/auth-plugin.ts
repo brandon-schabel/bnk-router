@@ -2,6 +2,7 @@ import {
     RouterPlugin,
     RouteConfig,
     RouteHandler,
+    ValidationSchema,
 } from '../router-types';
 import { Router } from '../router';
 import { HttpMethod } from '@bnk/cors';
@@ -20,12 +21,15 @@ export type AuthData = {
     onError?: (error: Error) => Response;
   }
   
+export interface RouteConfigWithAuth<V extends ValidationSchema | undefined, T> extends RouteConfig<V, T> {
+    auth?: boolean;
+}
 
 /**
  * Simple AuthPlugin that:
  * 1. Keeps a global AuthConfig if desired
  * 2. Checks if `opts.auth` is truthy when registering routes
- * 3. If so, wraps the route’s handler with authentication logic
+ * 3. If so, wraps the route's handler with authentication logic
  */
 export class AuthPlugin<A extends AuthData = AuthData> implements RouterPlugin {
     name = 'auth-plugin';
@@ -54,12 +58,16 @@ export class AuthPlugin<A extends AuthData = AuthData> implements RouterPlugin {
         router: Router,
         method: HttpMethod,
         path: string,
-        opts: RouteConfig<any, any>, // might be typed more strictly in your code
+        opts: RouteConfigWithAuth<any, any>,
         handler: RouteHandler<any, any>
     ): Promise<{
-        opts?: RouteConfig<any, any>;
+        opts?: RouteConfigWithAuth<any, any>;
         handler?: RouteHandler<any, any>;
     }> {
+        // Skip if auth is not required
+        if (!opts.auth) {
+            return {};
+        }
 
         // Prepare a wrapped handler that performs authentication + validation
         const wrappedHandler: RouteHandler<any, any> = async (req, validatedData) => {
@@ -81,7 +89,7 @@ export class AuthPlugin<A extends AuthData = AuthData> implements RouterPlugin {
                 const userAuthData = await routeAuth.verify(req);
                 (req as any).auth = userAuthData; // attach user info to request
             } catch (error) {
-                // If verification fails, see if there’s a route-level or global onError
+                // If verification fails, see if there's a route-level or global onError
                 if (routeAuth.onError) {
                     return routeAuth.onError(error as Error);
                 }
@@ -93,10 +101,6 @@ export class AuthPlugin<A extends AuthData = AuthData> implements RouterPlugin {
 
             // 3) Re-validate request with updated `req.auth` if necessary
             try {
-                // If you want to re-validate the request body/params again, you can do so:
-                // const data = await validateRequest(req, validatedData.params ?? {}, opts.validation);
-                // But typically, `validatedData` is already validated in the router core.
-
                 // Merge the validated data with auth
                 const finalData = { ...validatedData, auth: (req as any).auth };
                 return handler(req, finalData);
@@ -119,14 +123,9 @@ export class AuthPlugin<A extends AuthData = AuthData> implements RouterPlugin {
             }
         };
 
-        // Remove or replace the `auth` property from opts if you prefer
-        // so that the router doesn't do anything with it (the router is now ignoring it anyway).
-        const updatedOpts = { ...opts };
-        // updatedOpts.auth = false; // e.g. if you want to strip out auth so the Router doesn't see it.
-
         // Return updated config and wrapped handler
         return {
-            opts: updatedOpts,
+            opts,
             handler: wrappedHandler,
         };
     }
