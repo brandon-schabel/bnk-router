@@ -176,21 +176,25 @@ describe("Router", () => {
           })
         }
       },
-      async () => new Response("success")
+      async (req, { body }) => new Response(JSON.stringify(body))
     );
 
     // Valid request
     const validReq = new Request("http://localhost/test", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: "John", age: 25 })
     });
     const validRes = await router.handle(validReq);
     expect(validRes?.status).toBe(200);
+    const validBody = await validRes?.json();
+    expect(validBody).toEqual({ name: "John", age: 25 });
 
-    // Invalid request - missing required field
+    // Invalid request
     const invalidReq = new Request("http://localhost/test", {
       method: "POST",
-      body: JSON.stringify({ name: "Jo" })
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Jo", age: 16 })
     });
     const invalidRes = await router.handle(invalidReq);
     expect(invalidRes?.status).toBe(400);
@@ -860,10 +864,10 @@ describe("Router Validation Error Response", () => {
       details: [
         {
           type: "body",
-          errors: [
-            { path: "name", message: expect.any(String) },
-            { path: "age", message: expect.any(String) }
-          ]
+          messages: expect.arrayContaining([
+            expect.stringContaining("name"),
+            expect.stringContaining("age")
+          ])
         }
       ]
     });

@@ -1,31 +1,29 @@
-import { z } from 'zod';
-import { ValidationSchema, ValidationError, InferBody, InferHeaders, InferParams, InferQuery } from './router-types';
+import {
+    ValidationSchema,
+    ValidationErrorItem,
+    ValidationFailedError,
+    ValidatedData,
+    RouterValidator
+} from "./router-types";
 
-export class ValidationFailedError extends Error {
-    constructor(public errors: ValidationError[]) {
-        super('Validation failed');
-        this.name = 'ValidationFailedError';
-    }
-}
-
-// Utility Functions
+/**
+ * Attempts to match a request path to a route path with parameters.
+ * Returns an object of { paramName: value } if matched, otherwise null.
+ */
 export function matchRoute(
     path: string,
-    routePath: string,
+    routePath: string
 ): Record<string, string> | null {
-    const pathWithoutQuery = path.split('?')[0];
+    const pathWithoutQuery = path.split("?")[0];
+    const cleanPath = pathWithoutQuery.replace(/\/+$/, "");
+    const cleanRoutePath = routePath.replace(/\/+$/, "");
 
-    const cleanPath = pathWithoutQuery.replace(/\/+$/, '');
-    const cleanRoutePath = routePath.replace(/\/+$/, '');
-
-
-    if (cleanPath === '' && cleanRoutePath === '') {
+    if (cleanPath === "" && cleanRoutePath === "") {
         return {};
     }
 
-    const pathParts = cleanPath.split('/').filter(Boolean);
-    const routeParts = cleanRoutePath.split('/').filter(Boolean);
-
+    const pathParts = cleanPath.split("/").filter(Boolean);
+    const routeParts = cleanRoutePath.split("/").filter(Boolean);
 
     if (pathParts.length !== routeParts.length) {
         return null;
@@ -37,9 +35,7 @@ export function matchRoute(
         const routePart = routeParts[i];
         const pathPart = pathParts[i];
 
-
-
-        if (routePart.startsWith(':')) {
+        if (routePart.startsWith(":")) {
             params[routePart.slice(1)] = pathPart;
         } else if (routePart !== pathPart) {
             return null;
@@ -49,42 +45,58 @@ export function matchRoute(
     return params;
 }
 
-export async function validateRequest<V extends ValidationSchema | undefined>(
+function callValidator<T>(validator: RouterValidator<T>, input: unknown): T {
+    if (typeof validator === "function") {
+        return validator(input);
+    }
+    if (validator && typeof validator.parse === "function") {
+        return validator.parse(input);
+    }
+    throw new Error("Invalid validator - must be function or object with parse method");
+}
+
+/**
+ * Validates the request using the provided ValidationSchema.
+ * If any part fails, we accumulate the errors and throw a ValidationFailedError.
+ */
+export async function validateRequest<
+    V extends ValidationSchema | undefined
+>(
     req: Request,
     params: Record<string, string>,
     validation?: V
-): Promise<{
-    params: InferParams<V>,
-    query: InferQuery<V>,
-    headers: InferHeaders<V>,
-    body: InferBody<V>
-}> {
-    const parsedData: any = {};
-    const errors: ValidationError[] = [];
+): Promise<ValidatedData<V>> {
+    const parsedData: any = {
+        params,
+        query: {},
+        headers: {},
+        body: undefined,
+    };
+    const errors: ValidationErrorItem[] = [];
 
     // Validate params
     if (validation?.params) {
         try {
-            parsedData.params = validation.params.parse(params);
-        } catch (error) {
-            if (error instanceof z.ZodError) {
-                errors.push({ type: 'params', errors: error });
-            }
+            parsedData.params = callValidator(validation.params, params);
+        } catch (err) {
+            errors.push({
+                type: "params",
+                messages: [err instanceof Error ? err.message : String(err)],
+            });
         }
-    } else {
-        parsedData.params = params;
     }
 
     // Validate query
     if (validation?.query) {
         const url = new URL(req.url);
-        const queryParams = Object.fromEntries(url.searchParams.entries());
+        const queryEntries = Object.fromEntries(url.searchParams.entries());
         try {
-            parsedData.query = validation.query.parse(queryParams);
-        } catch (error) {
-            if (error instanceof z.ZodError) {
-                errors.push({ type: 'query', errors: error });
-            }
+            parsedData.query = callValidator(validation.query, queryEntries);
+        } catch (err) {
+            errors.push({
+                type: "query",
+                messages: [err instanceof Error ? err.message : String(err)],
+            });
         }
     } else {
         parsedData.query = Object.fromEntries(new URL(req.url).searchParams.entries());
@@ -92,34 +104,59 @@ export async function validateRequest<V extends ValidationSchema | undefined>(
 
     // Validate headers
     if (validation?.headers) {
-        const headers = Object.fromEntries((req.headers as any).entries());
+        const hdrs: Record<string, string> = {};
+        req.headers.forEach((value, key) => {
+            hdrs[key] = value;
+        });
         try {
-            parsedData.headers = validation.headers.parse(headers);
-        } catch (error) {
-            if (error instanceof z.ZodError) {
-                errors.push({ type: 'headers', errors: error });
-            }
+            parsedData.headers = callValidator(validation.headers, hdrs);
+        } catch (err) {
+            errors.push({
+                type: "headers",
+                messages: [err instanceof Error ? err.message : String(err)],
+            });
         }
     } else {
-        parsedData.headers = Object.fromEntries((req.headers as any).entries());
+        const hdrs: Record<string, string> = {};
+        req.headers.forEach((value, key) => {
+            hdrs[key] = value;
+        });
+        parsedData.headers = hdrs;
     }
 
     // Validate body
     if (validation?.body) {
         try {
-            const body = await req.json();
-            parsedData.body = validation.body.parse(body);
-        } catch (error) {
-            if (error instanceof z.ZodError) {
-                errors.push({ type: 'body', errors: error });
+            const contentType = req.headers.get("content-type") || "";
+            let bodyData: unknown;
+
+            if (contentType.includes("application/json")) {
+                try {
+                    bodyData = await req.clone().json();
+                } catch (err) {
+                    errors.push({
+                        type: "body",
+                        messages: ["Invalid JSON in request body"],
+                    });
+                    throw new ValidationFailedError(errors);
+                }
             } else {
+                bodyData = await req.clone().text();
+            }
+
+            try {
+                parsedData.body = callValidator(validation.body, bodyData);
+            } catch (err) {
                 errors.push({
-                    type: 'body',
-                    errors: new z.ZodError([{
-                        code: 'custom',
-                        path: [],
-                        message: 'Invalid JSON'
-                    }])
+                    type: "body",
+                    messages: [err instanceof Error ? err.message : String(err)],
+                });
+            }
+        } catch (err) {
+            if (!errors.some(e => e.type === "body")) {
+                errors.push({
+                    type: "body",
+                    messages: [err instanceof Error ? err.message : String(err)],
                 });
             }
         }
@@ -130,5 +167,18 @@ export async function validateRequest<V extends ValidationSchema | undefined>(
     }
 
     return parsedData;
+}
+
+/**
+ * Helper to convert any thrown error into a string message.
+ */
+function extractErrorMessage(err: unknown): string {
+    if (err instanceof Error) {
+        return err.message;
+    }
+    if (typeof err === "string") {
+        return err;
+    }
+    return "Unknown validation error";
 }
 

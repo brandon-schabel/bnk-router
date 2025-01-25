@@ -1,4 +1,5 @@
-import { matchRoute, validateRequest, ValidationFailedError } from './router-utils';
+import { matchRoute, validateRequest } from './router-utils';
+import { ValidationFailedError } from './router-types';
 import { AuthHandler } from './auth/auth-handler';
 import {
   RouteHandler,
@@ -10,7 +11,6 @@ import {
   AuthData,
   RequestWithData,
   AuthConfig,
-  AuthMiddlewareConfig,
   RouterPlugin,
   PluginHookFunction
 } from './router-types';
@@ -26,7 +26,7 @@ export class Router {
 
   constructor(opts?: RouterOptions) {
     if (opts?.auth) {
-      this.authHandler = new AuthHandler(opts?.auth);
+      this.authHandler = new AuthHandler(opts.auth);
     }
     if (opts?.onError) this.onError = opts.onError;
   }
@@ -50,7 +50,7 @@ export class Router {
     return null;
   }
 
-  use(mw: Middleware, path?: string) {
+  use(mw: Middleware<any>, path?: string) {
     if (path) {
       const arr = this.pathMws.get(path) || [];
       arr.push(mw);
@@ -83,20 +83,44 @@ export class Router {
     await this.runPluginHook('onAfterRouteRegister', this, method, path, opts);
   }
 
-  async get<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(path: string, opts: RouteConfig<V, A, T>, h: RouteHandler<V, A, T>) {
-    await this.addRoute('GET', path, opts, h);
+  async get<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
+    path: string,
+    opts: RouteConfig<V, A, T>,
+    handler: RouteHandler<V, A, T>
+  ) {
+    await this.addRoute('GET', path, opts, handler);
   }
-  async post<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(path: string, opts: RouteConfig<V, A, T>, h: RouteHandler<V, A, T>) {
-    await this.addRoute('POST', path, opts, h);
+
+  async post<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
+    path: string,
+    opts: RouteConfig<V, A, T>,
+    handler: RouteHandler<V, A, T>
+  ) {
+    await this.addRoute('POST', path, opts, handler);
   }
-  async put<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(path: string, opts: RouteConfig<V, A, T>, h: RouteHandler<V, A, T>) {
-    await this.addRoute('PUT', path, opts, h);
+
+  async put<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
+    path: string,
+    opts: RouteConfig<V, A, T>,
+    handler: RouteHandler<V, A, T>
+  ) {
+    await this.addRoute('PUT', path, opts, handler);
   }
-  async patch<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(path: string, opts: RouteConfig<V, A, T>, h: RouteHandler<V, A, T>) {
-    await this.addRoute('PATCH', path, opts, h);
+
+  async patch<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
+    path: string,
+    opts: RouteConfig<V, A, T>,
+    handler: RouteHandler<V, A, T>
+  ) {
+    await this.addRoute('PATCH', path, opts, handler);
   }
-  async delete<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(path: string, opts: RouteConfig<V, A, T>, h: RouteHandler<V, A, T>) {
-    await this.addRoute('DELETE', path, opts, h);
+
+  async delete<V extends ValidationSchema | undefined, A = AuthData, T = unknown>(
+    path: string,
+    opts: RouteConfig<V, A, T>,
+    handler: RouteHandler<V, A, T>
+  ) {
+    await this.addRoute('DELETE', path, opts, handler);
   }
 
   private async runPluginResponseHook(req: Request, res: Response): Promise<Response> {
@@ -147,7 +171,7 @@ export class Router {
   public matchRouteHandler(method: HttpMethod, path: string): { route: Route<any>; params: Record<string, string> } | null {
     for (const r of this.routes) {
       if (r.method !== method) continue;
-      const params = matchRoute(path, r.path); // Enable debug mode to see matching process
+      const params = matchRoute(path, r.path);
       if (params) return { route: r, params };
     }
     return null;
@@ -164,34 +188,36 @@ export class Router {
         const data = await validateRequest(req, params, opts.validation);
         return handler(req, data);
       } catch (e) {
-        if (e instanceof ValidationFailedError) return this.buildValidationErrorRes(e);
+        if (e instanceof ValidationFailedError) {
+          return this.buildValidationErrorRes(e);
+        }
         throw e;
       }
     }
 
     if (typeof opts.auth === 'object') {
-      const authResponse = await this.authHandler.authenticateRequest<A>(
-        req as unknown as RequestWithData<A>,
-        opts.auth as AuthMiddlewareConfig<A extends AuthData ? A : never>,
-        params,
-        opts.validation,
-        handler as RouteHandler<V, AuthData>
-      );
-      if (!authResponse) {
-        throw new Error('Authentication failed');
+      try {
+        const authData = await opts.auth.verify(req);
+        (req as any).auth = authData;
+      } catch (err) {
+        if (opts.auth.onError) {
+          return opts.auth.onError(err as Error);
+        }
+        return new Response('Authentication failed', { status: 401 });
       }
-      return authResponse;
+    } else {
+      const { response: authRes, authData } = await this.authHandler.handleAuth(req, opts.auth);
+      if (authRes) return authRes;
+      (req as any).auth = authData;
     }
 
-    const { response: authRes, authData } = await this.authHandler.handleAuth(req, opts.auth);
-    if (authRes) return authRes;
-
-    const authReq = Object.assign(req.clone(), { auth: authData }) as RequestWithData<T>;
     try {
       const data = await validateRequest(req, params, opts.validation);
-      return handler(authReq, data);
+      return handler(req, { ...data, auth: (req as any).auth });
     } catch (e) {
-      if (e instanceof ValidationFailedError) return this.buildValidationErrorRes(e);
+      if (e instanceof ValidationFailedError) {
+        return this.buildValidationErrorRes(e);
+      }
       throw e;
     }
   }
@@ -217,12 +243,15 @@ export class Router {
   private buildValidationErrorRes(err: ValidationFailedError): Response {
     const details = err.errors.map(e => ({
       type: e.type,
-      errors: e.errors.errors.map(d => ({ path: d.path.join('.'), message: d.message }))
+      messages: e.messages
     }));
-    return new Response(JSON.stringify({ error: 'Validation failed', details }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
-    });
+    return new Response(
+      JSON.stringify({ error: 'Validation failed', details }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
   }
 
   private notFoundRes(): Response {
@@ -236,14 +265,17 @@ export class Router {
     const pluginResponse = await this.runPluginHook('onError', error, req);
     if (pluginResponse) return pluginResponse;
 
-    const defaultRes = new Response(
+    if (this.onError) {
+      return this.onError(error, req);
+    }
+
+    return new Response(
       JSON.stringify({
         error: 'Internal Server Error',
         message: error instanceof Error ? error.message : 'An unexpected error occurred.'
       }),
       { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
-    return this.onError ? this.onError(error, req) : defaultRes;
   }
 
   private setContentType(res: Response) {

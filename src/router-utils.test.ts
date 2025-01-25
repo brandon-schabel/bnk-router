@@ -3,11 +3,10 @@ import { z } from 'zod';
 import {
   matchRoute,
   validateRequest,
-  ValidationFailedError,
 } from './router-utils';
 import { CorsOptions } from '@bnk/cors';
 import { getAllowedOrigin, addCorsHeaders } from '@bnk/cors';
-
+import { ValidationFailedError } from './router-types';
 describe("router-utils", () => {
 
   describe("matchRoute", () => {
@@ -198,40 +197,61 @@ describe("router-utils", () => {
     });
 
     test("aggregates multiple validation errors", async () => {
-      const body = { name: 'Jo' }; // Invalid 'name' and missing 'age'
-      const req = new Request('http://localhost/test?page=-1', {
-        method: 'POST',
-        body: JSON.stringify(body),
-        headers: {}
-      });
-      const params = { id: '12' }; // Invalid 'id'
       const validation = {
         params: z.object({
-          id: z.string().min(3)
+          id: z.string().min(5)
         }),
         query: z.object({
-          page: z.string().transform(Number).refine(n => n > 0)
-        }),
-        body: z.object({
-          name: z.string().min(3),
-          age: z.number()
+          filter: z.string().min(1, "Filter cannot be empty")
         }),
         headers: z.object({
-          'content-type': z.string()
+          'x-api-key': z.string()
+        }),
+        body: z.object({
+          name: z.string().min(3)
         })
       };
+
+      const req = new Request("http://localhost/test?filter=", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "a" })
+      });
+
+      let validationError: ValidationFailedError | null = null;
+      
       try {
-        await validateRequest(req, params, validation);
+        await validateRequest(req, { id: "123" }, validation);
       } catch (error) {
         expect(error).toBeInstanceOf(ValidationFailedError);
-        const validationError = error as ValidationFailedError;
-        expect(validationError.errors.length).toBe(4);
-        const errorTypes = validationError.errors.map(e => e.type);
-        expect(errorTypes).toContain('params');
-        expect(errorTypes).toContain('query');
-        expect(errorTypes).toContain('body');
-        expect(errorTypes).toContain('headers');
+        validationError = error as ValidationFailedError;
       }
+
+      expect(validationError).not.toBeNull();
+      if (!validationError) return; // TypeScript guard
+
+      // Log the actual errors for debugging
+
+      expect(validationError.errors.length).toBe(4);
+      
+      const errorTypes = validationError.errors.map(e => e.type);
+      expect(errorTypes).toContain("params");  // id too short
+      expect(errorTypes).toContain("query");   // empty filter
+      expect(errorTypes).toContain("headers"); // missing x-api-key
+      expect(errorTypes).toContain("body");    // name too short
+      
+      // Verify specific error messages
+      const paramError = validationError.errors.find(e => e.type === "params");
+      expect(paramError?.messages[0]).toContain("String must contain at least 5 character(s)");
+      
+      const queryError = validationError.errors.find(e => e.type === "query");
+      expect(queryError?.messages[0]).toContain("Filter cannot be empty");
+      
+      const headerError = validationError.errors.find(e => e.type === "headers");
+      expect(headerError?.messages[0]).toContain("Required");
+      
+      const bodyError = validationError.errors.find(e => e.type === "body");
+      expect(bodyError?.messages[0]).toContain("String must contain at least 3 character(s)");
     });
 
     test("throws ValidationFailedError when body contains invalid JSON", async () => {

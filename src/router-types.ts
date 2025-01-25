@@ -1,4 +1,3 @@
-import { z } from 'zod';
 import { Router } from './router';
 import { CorsOptions, HttpMethod } from '@bnk/cors';
 
@@ -6,6 +5,7 @@ import { CorsOptions, HttpMethod } from '@bnk/cors';
 // Auth Types
 export type AuthData = {
   userId: string;
+  roles?: string[];
   [key: string]: unknown;
 };
 
@@ -21,16 +21,45 @@ export type RequestWithData<T = unknown> = Request & {
 };
 
 // Validation Types
-export type ValidationSchema = {
-  params?: z.ZodType<any>;
-  body?: z.ZodType<any>;
-  query?: z.ZodType<any>;
-  headers?: z.ZodType<any>;
+export interface AnySchema<T> {
+  parse: (input: unknown) => T;
+}
+
+export type RouterValidator<T> =
+  | ((input: unknown) => T)
+  | AnySchema<T>;
+
+export interface ValidationSchema<
+  P = any,
+  Q = any,
+  H = any,
+  B = any
+> {
+  params?: RouterValidator<P>;
+  query?: RouterValidator<Q>;
+  headers?: RouterValidator<H>;
+  body?: RouterValidator<B>;
+}
+
+export type ValidationErrorItem = {
+  type: 'params' | 'query' | 'headers' | 'body';
+  messages: string[];
 };
 
-export interface ValidationError {
-  type: 'params' | 'body' | 'query' | 'headers';
-  errors: z.ZodError;
+export class ValidationFailedError extends Error {
+  constructor(public errors: ValidationErrorItem[]) {
+    super("Validation failed");
+    this.name = "ValidationFailedError";
+  }
+}
+
+export interface ValidatedData<
+  V extends ValidationSchema | undefined
+> {
+  params: V extends ValidationSchema<infer P, any, any, any> ? P : any;
+  query: V extends ValidationSchema<any, infer Q, any, any> ? Q : any;
+  headers: V extends ValidationSchema<any, any, infer H, any> ? H : any;
+  body: V extends ValidationSchema<any, any, any, infer B> ? B : any;
 }
 
 // Router Types
@@ -44,11 +73,11 @@ export type RouteHandler<
   T = unknown
 > = (
   req: RequestWithData<T>,
-  data: InferValidatedData<V>
+  validatedData: ValidatedData<V> & { auth?: A }
 ) => Promise<Response> | Response;
 
-export interface RouteConfig<V extends ValidationSchema | undefined, A = AuthData, T = unknown> {
-  auth?: boolean | AuthMiddlewareConfig<A>;
+export interface RouteConfig<V extends ValidationSchema | undefined = undefined, A = AuthData, T = unknown> {
+  auth?: boolean | AuthMiddlewareConfig<A> | AuthHandlerRef;
   validation?: V;
   middleware?: Middleware<T>[];
 }
@@ -73,18 +102,30 @@ export interface AuthMiddlewareConfig<A = AuthData> {
   onError?: (error: Error) => Response;
 }
 
+export interface AuthHandlerRef {
+  verify: (req: Request) => Promise<AuthData>;
+  onError?: (error: Error) => Response;
+}
+
 // Type Inference Helpers
+type InferSchema<T> =
+  T extends AnySchema<infer Parsed>
+    ? Parsed
+    : T extends (input: unknown) => infer FnReturn
+    ? FnReturn
+    : unknown;
+
 export type InferParams<V extends ValidationSchema | undefined> =
-  V extends { params: z.ZodTypeAny } ? z.infer<V['params']> : Record<string, string>;
+  V extends { params: infer P } ? InferSchema<P> : Record<string, string>;
 
 export type InferQuery<V extends ValidationSchema | undefined> =
-  V extends { query: z.ZodTypeAny } ? z.infer<V['query']> : Record<string, string>;
+  V extends { query: infer Q } ? InferSchema<Q> : Record<string, string>;
 
 export type InferHeaders<V extends ValidationSchema | undefined> =
-  V extends { headers: z.ZodTypeAny } ? z.infer<V['headers']> : Record<string, string>;
+  V extends { headers: infer H } ? InferSchema<H> : Record<string, string>;
 
 export type InferBody<V extends ValidationSchema | undefined> =
-  V extends { body: z.ZodTypeAny } ? z.infer<V['body']> : unknown;
+  V extends { body: infer B } ? InferSchema<B> : unknown;
 
 export type InferValidatedData<V extends ValidationSchema | undefined> = {
   params: InferParams<V>;

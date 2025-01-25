@@ -156,9 +156,11 @@ await router.get('/admin', {
 
 If `auth` is `true`, the global auth configuration is used. If it's an object, that route uses its own auth logic.
 
-## Validation
+### Validation
 
-You can validate `params`, `query`, `headers`, and `body` using [Zod](https://zod.dev/):
+The router supports any validation library that implements a `parse()` method or validation function. Here are examples using different approaches:
+
+### Using Zod (Still Supported)
 
 ```typescript
 import { z } from 'zod';
@@ -175,6 +177,77 @@ await router.post('/items/:id', {
   return json({ params, query, headers, body });
 });
 ```
+
+### Using ArkType
+
+```typescript
+import { type } from 'arktype';
+
+const userSchema = type({
+  name: 'string',
+  email: /@/,
+  age: 'integer'
+});
+
+await router.post('/ark-users', {
+  validation: {
+    body: userSchema
+  },
+}, async (_req, { body }) => {
+  // body is typed as { name: string; email: string; age: number }
+  return json(body);
+});
+```
+
+### Using Custom Validation Functions
+
+```typescript
+// Simple number validator
+function validateNumber(input: unknown): number {
+  if (typeof input !== 'number') {
+    throw new Error('Expected a number');
+  }
+  return input;
+}
+
+// Object validator
+function validateUser(input: unknown): { name: string; age: number } {
+  if (typeof input !== 'object' || input === null) {
+    throw new Error('Invalid user data');
+  }
+  const { name, age } = input as any;
+  if (typeof name !== 'string') throw new Error('Name must be a string');
+  if (typeof age !== 'number') throw new Error('Age must be a number');
+  return { name, age };
+}
+
+await router.post('/custom-validated', {
+  validation: {
+    body: validateUser,
+    query: validateNumber
+  },
+}, async (_req, { body, query }) => {
+  // body: { name: string; age: number }
+  // query: number
+  return json({ body, query });
+});
+```
+
+### Using Yup
+
+```typescript
+import * as yup from 'yup';
+const yupSchema = yup.object({ id: yup.string().uuid().required() });
+
+await router.get('/yup-validated/:id', {
+  validation: {
+    params: { parse: (input) => yupSchema.validateSync(input) } // Wrap Yup's validateSync
+  },
+}, async (_req, { params }) => {
+  return json(params); // params: { id: string }
+});
+```
+
 
 If validation fails, the router returns a `400` error with details about the validation issues.
 

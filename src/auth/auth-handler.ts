@@ -1,12 +1,13 @@
-import { 
-  AuthConfig, 
-  AuthData, 
-  AuthMiddlewareConfig, 
+import {
+  AuthConfig,
+  AuthData,
+  AuthMiddlewareConfig,
   RequestWithData,
   RouteHandler,
-  ValidationSchema 
+  ValidationSchema
 } from '../router-types';
-import { validateRequest, ValidationFailedError } from '../router-utils';
+import { validateRequest, } from '../router-utils';
+import { ValidationFailedError } from '../router-types';
 
 export class AuthHandler {
   private config?: AuthConfig;
@@ -46,22 +47,23 @@ export class AuthHandler {
       // Use route-specific verify if provided, otherwise use global
       const verifyFn = typeof authConfig === 'object' ? authConfig.verify : this.config.verify;
       const authData = await verifyFn(req);
-
       return { response: null, authData: authData as A };
     } catch (error) {
       // Use route-specific error handler if provided, otherwise use global
-      const errorHandler = 
-        typeof authConfig === 'object' ? 
-          authConfig.onError || this.config.onError : 
-          this.config.onError;
+      const errorHandler =
+        typeof authConfig === 'object'
+          ? authConfig.onError || this.config.onError
+          : this.config.onError;
+
+      const err = error instanceof Error ? error : new Error(String(error));
 
       return {
-        response: errorHandler ? 
-          errorHandler(error) : 
-          new Response(
-            JSON.stringify({ error: 'Authentication failed', message: (error as Error).message }),
-            { status: 401, headers: { 'Content-Type': 'application/json' } }
-          ),
+        response: errorHandler
+          ? errorHandler(err)
+          : new Response(
+              JSON.stringify({ error: 'Authentication failed', message: err.message }),
+              { status: 401, headers: { 'Content-Type': 'application/json' } }
+            ),
         authData: null
       };
     }
@@ -77,17 +79,14 @@ export class AuthHandler {
     // Create temporary auth handler with route-specific config
     const tempHandler = new AuthHandler({
       ...authConfig,
-      verify: async (request) => {
-        const result = await authConfig.verify(request);
-        return result;
-      }
+      verify: async (request) => authConfig.verify(request)
     });
 
     // Handle authentication
     const { response: authResponse, authData } = await tempHandler.handleAuth(req, true);
     if (authResponse) return authResponse;
 
-    // Create authenticated request
+    // Clone & attach auth
     const authedReq = Object.assign(req.clone(), { auth: authData }) as RequestWithData<T>;
 
     try {
@@ -96,19 +95,19 @@ export class AuthHandler {
       return await handler(authedReq, parsedData);
     } catch (error) {
       if (error instanceof ValidationFailedError) {
-        return new Response(JSON.stringify({
-          error: 'Validation failed',
-          details: error.errors.map(err => ({
-            type: err.type,
-            errors: err.errors.errors.map(e => ({
-              path: e.path.join('.'),
-              message: e.message
+        return new Response(
+          JSON.stringify({
+            error: 'Validation failed',
+            details: error.errors.map(err => ({
+              type: err.type,
+              messages: err.messages
             }))
-          }))
-        }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json' }
-        });
+          }),
+          {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' }
+          }
+        );
       }
       throw error;
     }

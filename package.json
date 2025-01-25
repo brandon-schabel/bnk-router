@@ -1,6 +1,6 @@
 {
     "name": "@bnk/router",
-    "version": "1.0.7",
+    "version": "1.0.8",
     "type": "module",
     "main": "index.ts",
     "types": "index.ts",
@@ -21,11 +21,11 @@
         "publish:router": "bun publish --access public"
     },
     "devDependencies": {
-        "bun-types": "latest"
+        "bun-types": "latest",
+        "zod": "^3.23.8"
     },
     "dependencies": {
-        "@bnk/cors": "^1.0.1",
-        "zod": "^3.23.8"
+        "@bnk/cors": "^1.0.1"
     },
     "repository": {
         "type": "git",
